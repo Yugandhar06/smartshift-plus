@@ -4,12 +4,6 @@
 
 > \*\*"When a flood hits Koramangala, SmartShift+ pays Ravi before he even gets home — automatically, fairly, and fraud-free."\*\*
 
-[!\[DEVTrails 2026](https://img.shields.io/badge/DEVTrails-2026-blue)](.)
-[!\[Persona](https://img.shields.io/badge/Persona-Food%20Delivery%20(Zomato%2FSwiggy)-orange)](.)
-[!\[Coverage](https://img.shields.io/badge/Coverage-Income%20Loss%20Only-green)](.)
-[!\[Pricing](https://img.shields.io/badge/Pricing-Weekly%20Plans-purple)](.)
-[!\[Platform](https://img.shields.io/badge/Platform-Mobile%20%2B%20Web%20Admin-lightgrey)](.)
-
 \---
 
 ## Table of Contents
