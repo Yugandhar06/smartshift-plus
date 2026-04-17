@@ -1,0 +1,492 @@
+return () => clearInterval(clock);
+  }, []);
+
+  // Poll for Zone Score every 3 seconds for REAL API integration
+  useEffect(() => {
+    let pollingInterval = setInterval(async () => {
+      try {
+        const res = await fetch(`${API_URL}/zones/${ZONE_ID}/score`);
+        if (res.ok) {
+          const data = await res.json();
+          // Update score visually based on API real data
+          updateScoreVisuals(data.score, data.signals);
+        }
+      } catch (err) {
+        console.error('Failed to poll zone score:', err);
+      }
+    }, 3000);
+    return () => clearInterval(pollingInterval);
+  }, [shiftActive, ordersToday, earnedToday]); // Dependencies for triggering proper events
+
+  
+  const handlePlanSelection = async (planType) => {
+    try {
+      const planDetails = {
+        'light': { weekly_premium: 99, coverage_ratio: 0.60, max_payout: 1500, hours_limit: 15 },
+        'regular': { weekly_premium: 179, coverage_ratio: 0.65, max_payout: 2500, hours_limit: 35 },
+        'standard': { weekly_premium: 249, coverage_ratio: 0.70, max_payout: 3500, hours_limit: 55 },
+        'pro': { weekly_premium: 349, coverage_ratio: 0.80, max_payout: 5000, hours_limit: 70 },
+        'max': { weekly_premium: 449, coverage_ratio: 0.90, max_payout: 7000, hours_limit: 9999 }
+      }[planType];
+
+      const startDate = new Date();
+      // Start today instead of next monday for demo
+      const res = await fetch(`http://localhost:8000/api/users/${USER_ID}/plans`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+           plan_type: planType,
+           weekly_premium: planDetails.weekly_premium,
+           coverage_ratio: planDetails.coverage_ratio,
+           max_payout: planDetails.max_payout,
+           hours_limit: planDetails.hours_limit,
+           start_date: startDate.toISOString().split('T')[0]
+        })
+      });
+      if (res.ok) {
+        setShowPlanModal(false);
+        fetchActivePlan();
+      } else {
+        const error = await res.json();
+        alert(`Could not upgrade plan: ${error.detail}`);
+      }
+    } catch (err) {
+      console.error("Plan Change failed", err);
+    }
+  };
+
+  const toggleShift = async () => {
+    if (!shiftActive) {
+      try {
+        const payload = {
+            user_id: USER_ID,
+            zone: "Koramangala",
+            lat: 12.9352,
+            lng: 77.6245
+        };
+        const res = await fetch(`${API_URL}/shift/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (res.ok && data.shift_id) {
+          SS.set('current_shift_id', data.shift_id);
+        }
+      } catch (err) {
+        console.error("Shift start api failed", err);
+      }
+      setShiftActive(true);
+      setShiftStart(Date.now());
+      setOrdersToday(3);
+      setEarnedToday(300);
+      shiftIntervalRef.current = setInterval(() => {
+        setShiftStart(prevStart => {
+          if (!prevStart) return prevStart;
+          const elapsed = Date.now() - prevStart;
+          const mins = Math.floor(elapsed / 60000);
+          const secs = Math.floor((elapsed % 60000) / 1000);
+          const hrs = (elapsed / 3600000).toFixed(1);
+          setShiftTimer(`${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')} active`);
+          setHoursToday(parseFloat(hrs));
+          return prevStart;
+        });
+      }, 1000);
+    } else {
+      try {
+        const shift_id = SS.get('current_shift_id') || 1;
+        const endPayload = {
+            shift_id: parseInt(shift_id),
+            orders_completed: ordersToday,
+            earned: earnedToday
+        };
+        await fetch(`${API_URL}/shift/end`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(endPayload)
+        });
+      } catch (err) {
+        console.error("Shift end api failed", err);
+      }
+      setShiftActive(false);
+      clearInterval(shiftIntervalRef.current);
+      setShiftTimer('Ended');
+    }
+  };
+
+  const updateScoreVisuals = (val, signals = {}) => {
+    let color = '#00e676';
+    let glow = '#00e67615';
+    let level = 'LOW RISK';
+    let desc = 'Clear skies. Normal order volume. Safe to work.';
+
+    if (val > 80) { color = '#b388ff'; glow = '#b388ff15'; level = 'EXTREME'; desc = 'Extreme weather/disruption. Full protection active.'; }
+    else if (val > 60) { color = '#ff5252'; glow = '#ff525215'; level = 'HIGH RISK'; desc = 'High disruption. Payout trigger active.'; }
+    else if (val > 30) { color = '#ffd740'; glow = '#ffd74015'; level = 'MEDIUM RISK'; desc = 'Moderate disruption. Stay alert.'; }
+
+    if (signals.manual_override_desc) {
+      desc = signals.manual_override_desc;
+    }
+
+    setScoreNum(val);
+    setScoreLevel(level);
+    setScoreDesc(desc);
+    setScoreColor(color);
+    setScoreGlow(glow);
+
+    // Signal Pills update
+    const nextPills = { rain: 'inactive', aqi: 'inactive', demand: 'inactive', bps: 'inactive' };
+    if (signals.rain && signals.rain > 15) nextPills.rain = 'active-r';
+    if (signals.order_drop && signals.order_drop > 40) nextPills.demand = 'active-r';
+    if (signals.bps_mock_blocked) { nextPills.bps = 'active-r'; color = '#ffd740'; level = 'FRAUD BLOCKED'; desc = 'GPS spoof detected. BPS: 0. Hard block.'; setScoreColor(color); setScoreLevel(level); setScoreDesc(desc); }
+
+    setPills(nextPills);
+
+    // Automating Demo Triggers if score crosses 60
+    if (val > 60 && !triggerAlert.show && signals.auto_trigger) {
+       handleBackendPayoutTrigger();
+    }
+  };
+
+  const handleBackendPayoutTrigger = async () => {
+    setTriggerAlert({ show: true, text: 'Disruption Detected - Payout Triggered', sub: '3-signal validation running...' });
+    
+    // Step 1: Create a simulated Shift via Admin to get a real Shift ID matching current UI worked stats
+    try {
+      const shiftRes = await fetch(`${API_URL}/admin/simulate/shift?user_id=${USER_ID}&zone_id=${ZONE_ID}&hours_worked=${hoursToday || 2.0}&earnings=${earnedToday}&orders_completed=${ordersToday}`, { method: 'POST' });
+      const shiftData = await shiftRes.json();
+      
+      if (shiftData.status === 'success') {
+         setTimeout(async () => {
+           setTriggerAlert(prev => ({ ...prev, sub: 'S& 3/3 signals confirmed  Payout calculating...' }));
+           
+           // Step 2: Call actual trigger endpoint for calculating payout based on policy rules
+           const payoutRes = await fetch(`${API_URL}/payouts/trigger?shift_id=${shiftData.shift_id}`, { method: 'POST' });
+           const payoutData = await payoutRes.json();
+           
+           if (payoutData.status === 'approved') {
+              const approvedAmt = payoutData.amount;
+              showPayout(approvedAmt, earnedToday, 900 - earnedToday, `₹${approvedAmt}`, '18 min');
+           } else {
+              setTriggerAlert(prev => ({ ...prev, sub: `:- Payout rejected: ${payoutData.reason}` }));
+           }
+         }, 2000);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const showPayout = (amt, actual, gap, amtStr, timeStr) => {
+    setWeekPayout(prev => prev + amt);
+    setWeekDisruptions(prev => prev + 1);
+    setWeekNet(prev => {
+      const net = (prev + 249 + amt) - 249; // Simplified
+      return net;
+    });
+
+    setPayoutNotif({ show: true, amt: amtStr, actual: `₹${actual}`, gap: `₹${gap}`, time: timeStr, rawAmt: amt });
+  };
+
+  // Demo overrides hit the backend to enforce "real integration"
+  const overrideBackendScore = async (scoreVal, signalsObj) => {
+    if (!shiftActive) toggleShift();
+    await fetch(`${API_URL}/zones/${ZONE_ID}/score?score=${scoreVal}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(signalsObj)
+    });
+  };
+
+  const simulateRain = () => {
+    overrideBackendScore(63, { auto_trigger: true, rain: 22, order_drop: 58, manual_override_desc: 'Heavy rain 22mm/hr. Deliveries affected. Payout trigger active.' });
+  };
+  const simulateFlood = () => {
+    overrideBackendScore(87, { auto_trigger: true, rain: 50, order_drop: 90, manual_override_desc: 'Flash flood alert. Zero orders required. Full protection active.' });
+  };
+  const simulateSpoofer = () => {
+    overrideBackendScore(65, { bps_mock_blocked: true, manual_override_desc: 'Attempting GPS spoof from home...' });
+    setPayoutNotif({ show: false, amt: 0, actual: 0, gap: 0, time: '' });
+    setTriggerAlert({ show: true, text: 'xa TrustMesh: Mock location flag DETECTED', sub: 'xa BPS: 0/100  Mock location + flat accelerometer + no zone history' });
+  };
+  const resetNormal = () => {
+    overrideBackendScore(28, { manual_override_desc: 'Clear skies. Normal order volume. Safe to work.' });
+    setTriggerAlert({ show: false, text: '', sub: '' });
+    setPayoutNotif({ ...payoutNotif, show: false });
+  };
+
+  return (
+    <div className="worker-app-wrapper">
+      <nav className="nav">
+        <div className="nav-logo">Smart<span>Shift+</span></div>
+        <div className="nav-right">
+          <div className="plan-badge">{CURRENT_PLAN} PLAN</div>
+          <div className="avatar">{WORKER_NAME ? WORKER_NAME.charAt(0).toUpperCase() : "W"}</div>
+        </div>
+      </nav>
+
+      <div className="main">
+        {/* GREETING */}
+        <div className="greeting">
+          <h2>Good evening, {WORKER_NAME} </h2>
+          <p>Koramangala • Monday, Week 12</p>
+        </div>
+
+
+          {/* SHIFT CARD */}
+        <div className="shift-card">
+          <div className="shift-header">
+            <div className="shift-title">MicroShield Coverage</div>
+            <div className="shift-time">{shiftTimer}</div>
+          </div>
+          <button className={`shift-btn ${shiftActive ? 'stop' : 'start'}`} onClick={toggleShift}>
+            <span>{shiftActive ? '' : 'Run'}</span> {shiftActive ? 'End Shift' : 'Start Shift'}
+          </button>
+          <div className="shift-stats">
+            <div className="shift-stat">
+              <div className="shift-stat-val">{hoursToday}</div>
+              <div className="shift-stat-lbl">Hrs Today</div>
+            </div>
+            <div className="shift-stat">
+              <div className="shift-stat-val">{ordersToday}</div>
+              <div className="shift-stat-lbl">Orders</div>
+            </div>
+            <div className="shift-stat">
+              <div className="shift-stat-val">₹{earnedToday}</div>
+              <div className="shift-stat-lbl">Earned</div>
+            </div>
+          </div>
+        </div>
+
+        {/* TRIGGER ALERT */}
+        <div className={`trigger-alert ${triggerAlert.show ? 'show' : ''}`}>
+          <div className="trigger-dot"></div>
+          <div>
+            <div className="trigger-text">{triggerAlert.text}</div>
+            <div className="trigger-sub">{triggerAlert.sub}</div>
+          </div>
+        </div>
+
+        {/* PAYOUT NOTIFICATION */}
+        <div className={`payout-notif ${payoutNotif.show ? 'show' : ''}`}>
+          <div className="payout-header">
+            <div className="payout-icon">x</div>
+            <div>
+              <div className="payout-title">Payout Approved!</div>
+              <div className="payout-sub">Disruption confirmed  All 3 signals matched</div>
+            </div>
+          </div>
+          <div className="payout-amount">{payoutNotif.amt}</div>
+          <div className="payout-breakdown">
+            <div className="payout-row"><span>PEB (expected)</span><span>₹900</span></div>
+            <div className="payout-row"><span>Actual earned</span><span>{payoutNotif.actual}</span></div>
+            <div className="payout-row"><span>Income gap</span><span>{payoutNotif.gap}</span></div>
+            <div className="payout-row"><span>Coverage (70%)</span><span>✓ 0.70</span></div>
+            <div className="payout-row"><span>Confidence (3/3)</span><span>✓ 100%</span></div>
+            <div className="payout-row total"><span>Payout</span><span>{payoutNotif.amt}</span></div>
+          </div>
+          <div className="payout-upi">
+            ₹<span>{payoutNotif.rawAmt}</span> sent to PhonePe  UPI  <span>{payoutNotif.time}</span>
+          </div>
+          <div className="bps-badge">BPS: 91 / 100  Genuine presence confirmed</div>
+        </div>
+
+        {/* SAFARSCORE CARD */}
+        <div className="score-card" style={{ borderColor: `${scoreColor}40`, '--score-glow': scoreGlow }}>
+          <div className="score-header">
+            <div className="score-label">SafarScore</div>
+            <div className="score-zone">Zone: <span>Koramangala</span></div>
+          </div>
+          <div className="score-display">
+            <div className="score-number" style={{ color: scoreColor }}>{Math.round(scoreNum)}</div>
+            <div className="score-right">
+              <div className="score-level" style={{ color: scoreColor }}>{scoreLevel}</div>
+              <div className="score-desc">{scoreDesc}</div>
+            </div>
+          </div>
+          <div className="score-bar-wrap">
+            <div className="score-bar-track">
+              <div className="score-bar-fill" style={{ width: `${scoreNum}%`, background: scoreColor }}></div>
+            </div>
+            <div className="score-bar-labels">
+              <span>0</span><span>LOW</span><span>MED</span><span>HIGH</span><span>100</span>
+            </div>
+          </div>
+          <div className="score-update">Updates every 15 min  Last updated <span>{lastUpdate}</span></div>
+
+          {/* Signal pills */}
+          <div className="signals-row">
+            <div className={`signal-pill ${pills.rain}`}>Rain</div>
+            <div className={`signal-pill ${pills.aqi}`}>AQI</div>
+            <div className={`signal-pill ${pills.demand}`}>Demand Drop</div>
+            <div className={`signal-pill ${pills.bps}`}>Presence</div>
+          </div>
+        </div>
+
+        {/* PLAN CARD */}
+        <div className="plan-card">
+          <div className="plan-card-header">
+            <div className="plan-card-title">Weekly Coverage Plan</div>
+            <div className="plan-tag">STANDARD</div>
+          </div>
+          <div className="plan-row">
+            <span className="plan-row-label">Weekly Premium</span>
+            <span className="plan-row-value green">₹249 / week</span>
+          </div>
+          <div className="plan-row">
+            <span className="plan-row-label">Coverage Ratio</span>
+            <span className="plan-row-value">70% of gap</span>
+          </div>
+          <div className="plan-row">
+            <span className="plan-row-label">Max Weekly Payout</span>
+            <span className="plan-row-value blue">₹3,500</span>
+          </div>
+          <div className="plan-row">
+            <span className="plan-row-label">Hours Covered</span>
+            <span className="plan-row-value">Up to 55 hrs/week</span>
+          </div>
+          <div className="plan-row">
+            <span className="plan-row-label">Next Billing</span>
+            <span className="plan-row-value">Monday 6:00 AM</span>
+          </div>
+        </div>
+
+        {/* WEEK SUMMARY */}
+        <div className="week-card">
+          <div className="week-title">x-` This Week's Summary</div>
+          <div className="week-grid">
+            <div className="week-item">
+              <div className="week-item-val green">₹249</div>
+              <div className="week-item-lbl">Premium Paid</div>
+            </div>
+            <div className="week-item">
+              <div className={`week-item-val ${weekPayout > 0 ? 'yellow' : ''}`}>₹{weekPayout}</div>
+              <div className="week-item-lbl">Payouts Received</div>
+            </div>
+            <div className="week-item">
+              <div className="week-item-val">18.5</div>
+              <div className="week-item-lbl">Hours Worked</div>
+            </div>
+            <div className="week-item">
+              <div className="week-item-val">{weekDisruptions}</div>
+              <div className="week-item-lbl">Disruptions</div>
+            </div>
+          </div>
+          <div className="week-net">
+            <div className="week-net-label">Net Position This Week</div>
+            <div className="week-net-value" style={{ color: weekNet >= 0 ? '#00e676' : '#ff5252' }}>
+              {weekNet >= 0 ? '+₹' : '-₹'}{Math.abs(weekNet)}
+            </div>
+          </div>
+        </div>
+
+        {/* DEMO CONTROLS */}
+        <div className="demo-controls">
+          <div className="demo-title">Demo Scenarios</div>
+          <div className="demo-btn-grid">
+            <div className="demo-btn rain" onClick={simulateRain}>Heavy Rain</div>
+            <div className="demo-btn flood" onClick={simulateFlood}>xR` Flash Flood</div>
+            <div className="demo-btn spoofer" onClick={simulateSpoofer}>GPS Spoofer</div>
+            <div className="demo-btn normal" onClick={resetNormal}>Reset Normal</div>
+          </div>
+        </div>
+
+        <div className="spacer"></div>
+
+        {/* PROFESSIONAL FOOTER */}
+        <footer style={{ marginTop: '50px', padding: '40px 20px', borderTop: '1px solid #22262e', background: '#0a0b0e', color: '#888', fontSize: '0.85rem', width: '100%', boxSizing: 'border-box' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '30px', maxWidth: '1200px', margin: '0 auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '30px' }}>
+              <div style={{ flex: '1 1 250px' }}>
+                <div style={{ fontSize: '1.4rem', fontWeight: 700, color: '#e8eaf0', marginBottom: '12px' }}>
+                  SmartShift<span style={{ color: '#00e676' }}>+</span>
+                </div>
+                <p style={{ margin: 0, lineHeight: 1.6, color: '#9ba1b0' }}>
+                  Empowering delivery fleets and gig workers with automated disruption insurance, dynamic routing, and financial stability when it matters most.
+                </p>
+              </div>
+
+              <div style={{ flex: '1 1 120px' }}>
+                <h4 style={{ color: '#fff', fontSize: '1rem', marginBottom: '16px' }}>Company</h4>
+                <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <li><a href="#" style={{ color: '#888', textDecoration: 'none' }}>About Us</a></li>
+                  <li><a href="#" style={{ color: '#888', textDecoration: 'none' }}>Our Mission</a></li>
+                  <li><a href="#" style={{ color: '#888', textDecoration: 'none' }}>Careers</a></li>
+                  <li><a href="#" style={{ color: '#888', textDecoration: 'none' }}>Press Room</a></li>
+                </ul>
+              </div>
+
+              <div style={{ flex: '1 1 120px' }}>
+                <h4 style={{ color: '#fff', fontSize: '1rem', marginBottom: '16px' }}>Resources</h4>
+                <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <li><a href="#" style={{ color: '#888', textDecoration: 'none' }}>Partner APIs</a></li>
+                  <li><a href="#" style={{ color: '#888', textDecoration: 'none' }}>TrustMesh Docs</a></li>
+                  <li><a href="#" style={{ color: '#888', textDecoration: 'none' }}>Help Center</a></li>
+                  <li><a href="#" style={{ color: '#888', textDecoration: 'none' }}>System Status</a></li>
+                </ul>
+              </div>
+
+              <div style={{ flex: '1 1 150px' }}>
+                <h4 style={{ color: '#fff', fontSize: '1rem', marginBottom: '16px' }}>Contact</h4>
+                <p style={{ margin: '0 0 10px 0', color: '#888' }}>support@smartshift.com</p>
+                <p style={{ margin: '0 0 10px 0', color: '#888' }}>1-800-SMARTSHIFT</p>
+                <p style={{ margin: 0, color: '#888' }}>Bengaluru, Karnataka</p>
+              </div>
+            </div>
+
+            <div style={{ borderTop: '1px solid #22262e', paddingTop: '24px', display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '15px' }}>
+              <div>&copy; {new Date().getFullYear()} SmartShift Technologies. All rights reserved.</div>
+              <div style={{ display: 'flex', gap: '20px' }}>
+                <a href="#" style={{ color: '#888', textDecoration: 'none' }}>Privacy Policy</a>
+                <a href="#" style={{ color: '#888', textDecoration: 'none' }}>Terms of Service</a>
+                <a href="#" style={{ color: '#888', textDecoration: 'none' }}>Cookie Policy</a>
+              </div>
+            </div>
+          </div>
+        </footer>
+      </div>
+
+      <ChatAssistantWidget />
+    
+
+      {/* PLAN CHANGE MODAL */}
+      {showPlanModal && (
+        <div className="modal-overlay" style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.8)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div className="plan-modal" style={{ background: '#1e1e1e', border: '1px solid #333', borderRadius: '12px', padding: '24px', width: '90%', maxWidth: '400px', maxHeight: '80vh', overflowY: 'auto' }}>
+            <h3 style={{ fontSize: '1.2rem', color: '#fff', marginBottom: '8px' }}>Select Weekly Coverage</h3>
+            <p style={{ color: '#888', fontSize: '0.9rem', marginBottom: '20px' }}>Your plan applies to the next 7 days of work.</p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {[{ id: 'light', premium: 99, cov: '60%', max: 1500 },
+                { id: 'regular', premium: 179, cov: '65%', max: 2500 },
+                { id: 'standard', premium: 249, cov: '70%', max: 3500 },
+                { id: 'pro', premium: 349, cov: '80%', max: 5000 },
+                { id: 'max', premium: 449, cov: '90%', max: 7000 }].map(p => (
+                <div key={p.id} 
+                     onClick={() => handlePlanSelection(p.id)}
+                     style={{ border: '1px solid #333', borderRadius: '8px', padding: '16px', background: '#252525', cursor: 'pointer' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                    <span style={{ color: '#fff', fontWeight: 600 }}>{p.id.toUpperCase()}</span>
+                    <span style={{ color: '#00e676', fontWeight: 600 }}>₹{p.premium} /wk</span>
+                  </div>
+                  <div style={{ color: '#888', fontSize: '0.85rem' }}>Covers {p.cov} up to ₹{p.max}</div>
+                </div>
+              ))}
+            </div>
+            
+            {planStatus !== 'Expired' && (
+              <button 
+                onClick={() => setShowPlanModal(false)}
+                style={{ width: '100%', padding: '14px', marginTop: '20px', background: 'transparent', border: '1px solid #555', color: '#fff', borderRadius: '8px', cursor: 'pointer' }}
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default WorkerApp;
